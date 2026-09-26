@@ -5,9 +5,11 @@ import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
 import {
   convertToModelMessages,
   pruneMessages,
+  simulateStreamingMiddleware,
   stepCountIs,
   streamText,
-  tool
+  tool,
+  wrapLanguageModel
 } from "ai";
 import { z } from "zod";
 
@@ -49,11 +51,15 @@ export class ChatAgent extends AIChatAgent<Env> {
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
     const mcpTools = this.mcp.getAITools();
     const workersai = createWorkersAI({ binding: this.env.AI });
-
-    const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.7-code", {
+    const model = wrapLanguageModel({
+      model: workersai("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
         sessionAffinity: this.sessionAffinity
       }),
+      middleware: simulateStreamingMiddleware()
+    });
+
+    const result = streamText({
+      model,
       system: `You are a helpful assistant that can understand images. You can check the weather, get the user's timezone, run calculations, and schedule tasks. When users share images, describe what you see and answer questions about them.
 
 ${getSchedulePrompt({ date: new Date() })}
@@ -101,8 +107,8 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
           description:
             "Perform a math calculation with two numbers. Requires user approval for large numbers.",
           inputSchema: z.object({
-            a: z.number().describe("First number"),
-            b: z.number().describe("Second number"),
+            a: z.coerce.number().describe("First number"),
+            b: z.coerce.number().describe("Second number"),
             operator: z
               .enum(["+", "-", "*", "/", "%"])
               .describe("Arithmetic operator")
