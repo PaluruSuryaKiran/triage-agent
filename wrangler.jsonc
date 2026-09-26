@@ -25,8 +25,8 @@
 	"durable_objects": {
 		"bindings": [
 			{
-				"class_name": "ChatAgent",
-				"name": "ChatAgent"
+				"class_name": "TriageAgent",
+				"name": "TriageAgent"
 			}
 		]
 	},
@@ -36,6 +36,15 @@
 				"ChatAgent"
 			],
 			"tag": "v1"
+		},
+		{
+			"renamed_classes": [
+				{
+					"from": "ChatAgent",
+					"to": "TriageAgent"
+				}
+			],
+			"tag": "v2"
 		}
 	],
 	"observability": {

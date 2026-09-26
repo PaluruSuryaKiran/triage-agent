@@ -1,22 +1,27 @@
-import { createWorkersAI } from "workers-ai-provider";
-import { callable, routeAgentRequest, type Schedule } from "agents";
-import { getSchedulePrompt, scheduleSchema } from "agents/schedule";
+import { callable, routeAgentRequest, type Connection } from "agents";
+import { getSchedulePrompt } from "agents/schedule";
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
 import {
   convertToModelMessages,
   pruneMessages,
-  simulateStreamingMiddleware,
   stepCountIs,
-  streamText,
-  tool,
-  wrapLanguageModel
+  streamText
 } from "ai";
-import { z } from "zod";
+import { createTriageModel } from "./models/triage-model";
+import type { IncidentCard } from "./models/incident";
+import { createIncidentTools } from "./tools/incident-tools";
+import { createSchedulingTools } from "./tools/scheduling-tools";
+import type { ScheduleInput, ScheduledTask } from "./types";
 
-export class ChatAgent extends AIChatAgent<Env> {
+type TriageAgentState = {
+  incident: IncidentCard | null;
+};
+
+export class TriageAgent extends AIChatAgent<Env, TriageAgentState> {
+  initialState: TriageAgentState = { incident: null };
   maxPersistedMessages = 100;
   chatRecovery = true;
-  // Wait for MCP connections to be re-established after hibernation before
+  // Wait for MCP connections to be re-established after hibernation before.
   // processing a message, so MCP tools aren't intermittently missing.
   waitForMcpConnections = true;
 
@@ -38,6 +43,20 @@ export class ChatAgent extends AIChatAgent<Env> {
     });
   }
 
+  validateStateChange(_nextState: TriageAgentState, source: Connection | "server") {
+    if (source !== "server") {
+      throw new Error("Incident state can only be changed by the server");
+    }
+  }
+
+  private loadIncidentTicket(): IncidentCard | null {
+    return this.state.incident;
+  }
+
+  private saveIncidentTicket(incident: IncidentCard): void {
+    this.setState({ ...this.state, incident });
+  }
+
   @callable()
   async addServer(name: string, url: string) {
     return await this.addMcpServer(name, url);
@@ -50,18 +69,27 @@ export class ChatAgent extends AIChatAgent<Env> {
 
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
     const mcpTools = this.mcp.getAITools();
-    const workersai = createWorkersAI({ binding: this.env.AI });
-    const model = wrapLanguageModel({
-      model: workersai("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
-        sessionAffinity: this.sessionAffinity
-      }),
-      middleware: simulateStreamingMiddleware()
-    });
+    const model = createTriageModel(this.env.AI, this.sessionAffinity);
+    const currentIncident = this.loadIncidentTicket();
 
     const result = streamText({
       model,
-      system: `You are a helpful assistant that can understand images. You can check the weather, get the user's timezone, run calculations, and schedule tasks. When users share images, describe what you see and answer questions about them.
+      temperature: 0.25,
+      system: `You are Triage Agent, an incident-management triage assistant. Analyze symptoms, logs, and evidence supplied by the user. You cannot inspect their environment or take actions unless an available tool explicitly does so. Never imply otherwise.
 
+    ${currentIncident ? `Current persisted incident ticket (authoritative stored state; update it when new user evidence changes the assessment):\n${JSON.stringify(currentIncident)}` : "No incident ticket exists yet. Create/update one with the updateIncident tool after assessing the incident."}
+
+    For every incident, connect the timeline/activity to the observed evidence before recommending action. Structure your response in this order:
+    1. **Most likely cause:** Put your leading hypothesis in the very first line. State confidence (high, medium, or low) and cite the specific evidence.
+    2. **Activity-to-evidence link:** Explain what happened before or during the incident, what changed afterward, and how the evidence supports (or fails to support) a causal link. Distinguish correlation from proof. Check timestamp ordering carefully; never say an event happened before another if the supplied times contradict that.
+    3. **Other likely causes:** Give the next one or two plausible hypotheses, one per line, ordered by likelihood. For each, tie the hypothesis to evidence and explain whether it could be a root cause, contributing factor, or downstream symptom. Do not present guesses as confirmed facts.
+    4. **Safest next actions:** Recommend practical, ordered diagnostic checks that test the leading hypothesis and alternatives. Prefer reversible, low-risk verification first (compare error rates by version/region, inspect deployment diff and health metrics, correlate traces/request IDs, check DB pool and upstream latency). State what result would support or weaken each hypothesis. Suggest rollback only when evidence indicates the activity/release is implicated and impact justifies it; frame it as a controlled mitigation, mention risks, and defer to the incident owner/runbook. Never jump to undoing the latest activity merely because it is recent.
+    5. **Impact and escalation:** Describe the plausible impact based on the evidence, clearly marking unknown scope. Recommend prompt escalation to the appropriate on-call, incident-response, security, or service owner when impact is severe, spreading, affects sensitive data or safety, or cannot be safely contained. Do not invent an organization's severity definitions or response-time commitments.
+    6. **Assumptions and questions:** Explicitly list assumptions you made. Ask only for missing information that would materially change the diagnosis or next action (for example, exact deploy start/finish time, whether errors began before or after deploy, version/region breakdown, affected users/payment methods, recent config or traffic changes, and relevant surrounding logs). If evidence is insufficient, say so and avoid false precision.
+
+    Be concise and calm. Separate observations from inferences.  Always check what changed recently (deploys, config, traffic, dependencies) and whether it affects one instance or all of them.
+    For follow-up messages, answer directly and only repeat the full structure when new evidence changes the diagnosis.
+    After every initial incident assessment and whenever the user provides new incident evidence or asks for a ticket change, call updateIncident with only changed fields and only changed hypothesis fields. Use the exact case-sensitive schema names; do not invent aliases or include unrecognized fields. Reuse an existing hypothesis ID when referring to that cause. For a genuinely new cause, omit id; the tool assigns the next sequential ID (h-001, h-002, ...). For each hypothesis update, give evidence and statusRationale describing the check/work that ruled it out, confirmed it, or the suggested fix/next test if active. A previously ruled-out hypothesis remains ruled out unless you provide new evidence and a rationale for reopening it. If updateIncident returns success:false, or the tool framework reports schema/input validation errors, read the returned validation details, correct the input, and retry the tool call. Never report a ticket update as saved unless the tool returns success:true. The tool sets the authoritative updated timestamp.
 ${getSchedulePrompt({ date: new Date() })}
 
 If the user asks to schedule a task, use the schedule tool to schedule the task.`,
@@ -74,125 +102,27 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
       tools: {
         // MCP tools from connected servers
         ...mcpTools,
-
-        // Server-side tool: runs automatically on the server
-        getWeather: tool({
-          description: "Get the current weather for a city",
-          inputSchema: z.object({
-            city: z.string().describe("City name")
-          }),
-          execute: async ({ city }) => {
-            // Replace with a real weather API in production
-            const conditions = ["sunny", "cloudy", "rainy", "snowy"];
-            const temp = Math.floor(Math.random() * 30) + 5;
-            return {
-              city,
-              temperature: temp,
-              condition:
-                conditions[Math.floor(Math.random() * conditions.length)],
-              unit: "celsius"
-            };
-          }
+        ...createIncidentTools({
+          load: () => this.loadIncidentTicket(),
+          save: (incident: IncidentCard) => this.saveIncidentTicket(incident)
         }),
-
-        // Client-side tool: no execute function — the browser handles it
-        getUserTimezone: tool({
-          description:
-            "Get the user's timezone from their browser. Use this when you need to know the user's local time.",
-          inputSchema: z.object({})
-        }),
-
-        // Approval tool: requires user confirmation before executing
-        calculate: tool({
-          description:
-            "Perform a math calculation with two numbers. Requires user approval for large numbers.",
-          inputSchema: z.object({
-            a: z.coerce.number().describe("First number"),
-            b: z.coerce.number().describe("Second number"),
-            operator: z
-              .enum(["+", "-", "*", "/", "%"])
-              .describe("Arithmetic operator")
-          }),
-          needsApproval: async ({ a, b }) =>
-            Math.abs(a) > 1000 || Math.abs(b) > 1000,
-          execute: async ({ a, b, operator }) => {
-            const ops: Record<string, (x: number, y: number) => number> = {
-              "+": (x, y) => x + y,
-              "-": (x, y) => x - y,
-              "*": (x, y) => x * y,
-              "/": (x, y) => x / y,
-              "%": (x, y) => x % y
-            };
-            if (operator === "/" && b === 0) {
-              return { error: "Division by zero" };
-            }
-            return {
-              expression: `${a} ${operator} ${b}`,
-              result: ops[operator](a, b)
-            };
-          }
-        }),
-
-        scheduleTask: tool({
-          description:
-            "Schedule a task to be executed at a later time. Use this when the user asks to be reminded or wants something done later.",
-          inputSchema: scheduleSchema,
-          execute: async ({ when, description }) => {
-            if (when.type === "no-schedule") {
-              return "Not a valid schedule input";
-            }
-            const input =
-              when.type === "scheduled"
-                ? when.date
-                : when.type === "delayed"
-                  ? when.delayInSeconds
-                  : when.type === "cron"
-                    ? when.cron
-                    : null;
-            if (!input) return "Invalid schedule type";
-            try {
-              this.schedule(input, "executeTask", description, {
-                idempotent: true
-              });
-              return `Task scheduled: "${description}" (${when.type}: ${input})`;
-            } catch (error) {
-              return `Error scheduling task: ${error}`;
-            }
-          }
-        }),
-
-        getScheduledTasks: tool({
-          description: "List all tasks that have been scheduled",
-          inputSchema: z.object({}),
-          execute: async () => {
-            const tasks = this.getSchedules();
-            return tasks.length > 0 ? tasks : "No scheduled tasks found.";
-          }
-        }),
-
-        cancelScheduledTask: tool({
-          description: "Cancel a scheduled task by its ID",
-          inputSchema: z.object({
-            taskId: z.string().describe("The ID of the task to cancel")
-          }),
-          execute: async ({ taskId }) => {
-            try {
-              this.cancelSchedule(taskId);
-              return `Task ${taskId} cancelled.`;
-            } catch (error) {
-              return `Error cancelling task: ${error}`;
-            }
-          }
+        ...createSchedulingTools({
+          schedule: (when: ScheduleInput, description: string) =>
+            this.schedule(when, "executeTask", description, {
+              idempotent: true
+            }),
+          getSchedules: () => this.getSchedules(),
+          cancelSchedule: (taskId: string) => this.cancelSchedule(taskId)
         })
       },
-      stopWhen: stepCountIs(20),
+      stopWhen: stepCountIs(8),
       abortSignal: options?.abortSignal
     });
 
     return result.toUIMessageStreamResponse();
   }
 
-  async executeTask(description: string, _task: Schedule<string>) {
+  async executeTask(description: string, _task: ScheduledTask) {
     // Do the actual work here (send email, call API, etc.)
     console.log(`Executing scheduled task: ${description}`);
 
