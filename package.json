@@ -13,6 +13,7 @@
   "scripts": {
     "dev": "vite dev",
     "start": "vite dev",
+    "test": "vitest run",
     "deploy": "vite build && wrangler deploy",
     "types": "wrangler types env.d.ts",
     "format": "oxfmt --write .",
@@ -46,6 +47,7 @@
     "tailwindcss": "^4.3.1",
     "typescript": "^6.0.3",
     "vite": "^8.1.0",
+    "vitest": "^5.0.2",
     "wrangler": "^4.141.0"
   },
   "allowScripts": {
