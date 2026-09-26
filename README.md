@@ -1,245 +1,89 @@
-# Agent Starter
+# Triage Agent
 
-![npm i agents command](./npm-agents-banner.svg)
+A small incident triage assistant running on Cloudflare. You paste logs or describe what's broken, and it tells you the most likely cause, a couple of other possibilities, and what to check next. While you talk to it, it keeps an incident card up to date: severity, hypotheses (active, confirmed or ruled out) and next actions. Closing an incident needs a human to approve it.
 
-<a href="https://deploy.workers.cloudflare.com/?url=https://github.com/cloudflare/agents-starter"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare"/></a>
+Live demo: `https://triage-agent.<subdomain>.workers.dev`
 
-A starter template for building AI chat agents on Cloudflare, powered by the [Agents SDK](https://developers.cloudflare.com/agents/).
+## Assignment checklist
 
-Uses Workers AI (no API key required), with tools for weather, timezone detection, calculations with approval, task scheduling, and vision (image input).
+- **LLM:** Llama 3.3 70B (`@cf/meta/llama-3.3-70b-instruct-fp8-fast`) on Workers AI
+- **Coordination:** one Durable Object per incident, using the Agents SDK's `AIChatAgent`
+- **User input:** chat UI
+- **Memory / state:** chat history plus the incident card, both stored in the incident's Durable Object
 
-## Quick start
+## What I built, and what came from the starter
+
+I started from Cloudflare's [agents-starter](https://github.com/cloudflare/agents-starter) template, following the Agents quick start. The starter gave me the React chat UI, the connection between the browser and the agent, saving chat messages, rendering tool calls in the chat, and the approve/reject buttons for tools that need approval.
+
+On top of that, I:
+
+- switched the model to Llama 3.3, since the starter's default model isn't available on the free plan
+- wrote the triage system prompt and tuned it through testing
+- designed the incident card and wrote the `updateIncident` and `closeIncident` tools
+- stored the card in the agent's state and fed it back into the prompt on every turn, so the model can see what's already recorded
+- gave each incident its own Durable Object, using an ID in the URL (`?incident=<id>`) and a "New incident" button
+- worked around a streaming bug in the Workers AI provider (see Known issues)
+- added unit tests for the incident tools
+- removed the starter parts I didn't need: demo tools, scheduling, MCP and image uploads
+
+## How the incident card works
+
+The model doesn't write to storage directly. When it learns something, it calls `updateIncident` with only the fields that changed. My code validates the input with Zod, applies it to the card and saves it with `setState`.
+
+A few rules I added along the way:
+
+- Hypothesis IDs (`h-001`, `h-002`, ...) and timestamps are set by the code, not the model. The model refers to hypotheses by those IDs in follow-ups.
+- The schemas are strict. If the model sends an unknown field or a bad value, the tool returns the error so the model can correct itself and retry. Formatting differences like `"High"` vs `high` are simply normalised.
+- Marking a hypothesis `ruled_out` or `confirmed` needs a reason, and a ruled-out one can only come back with new evidence.
+- `updateIncident` can't close an incident. Only `closeIncident` can, and it waits for approval in the UI. After that, the card can't change and the chat is closed.
+- The browser can't change the card. Only the server can.
+
+## Run it locally
+
+You need Node.js and a free Cloudflare account.
 
 ```bash
-npx create-cloudflare@latest --template cloudflare/agents-starter
-cd agents-starter
+git clone https://github.com/PaluruSuryaKiran/triage-agent.git
+cd triage-agent
 npm install
+npx wrangler login
 npm run dev
 ```
 
-> **Cloudflare authentication is required to run locally.** This template uses
-> Workers AI with `"ai": { "remote": true }` in `wrangler.jsonc`, and Workers AI
-> has no local simulator — so `npm run dev` opens a remote proxy session against
-> Cloudflare and needs you to be authenticated. Either run `wrangler login` once
-> in an interactive terminal, or set a `CLOUDFLARE_API_TOKEN` environment
-> variable (e.g. in a `.env` file). No third-party (OpenAI/Anthropic) key is
-> needed, but a Cloudflare login is.
+Then open http://localhost:5173. The model runs on Cloudflare even in local dev, so it uses your account's free Workers AI allowance.
 
-Open [http://localhost:5173](http://localhost:5173) to see your agent in action.
+To deploy: `npm run deploy`
 
-Try these prompts to see the different features:
+## Try it
 
-- **"What's the weather in Paris?"** — server-side tool (runs automatically)
-- **"What timezone am I in?"** — client-side tool (browser provides the answer)
-- **"Calculate 5000 \* 3"** — approval tool (asks you before running)
-- **"Remind me in 5 minutes to take a break"** — scheduling
-- **Drop an image and ask "What's in this image?"** — vision (image understanding)
+1. Paste the contents of `samples/incident1.txt`.
+2. Follow up with: `Checked the DB: 2.8.1 reduced the pool size from 100 to 40.`
+3. Then: `Rolled back 2.8.1 and the 503s stopped. Close the incident.` and approve the close.
 
-## Project structure
-
-```
-src/
-  server.ts    # Chat agent with tools and scheduling
-  app.tsx      # Chat UI built with Kumo components
-  client.tsx   # React entry point
-  styles.css   # Tailwind + Kumo styles
-```
-
-## What's included
-
-- **AI Chat** — Streaming responses powered by Workers AI via `AIChatAgent`
-- **Image input** — Drag-and-drop, paste, or click to attach images for vision-capable models
-- **Three tool patterns** — server-side auto-execute, client-side (browser), and human-in-the-loop approval
-- **Scheduling** — one-time, delayed, and recurring (cron) tasks
-- **Reasoning display** — shows model thinking as it streams, collapses when done
-- **Debug mode** — toggle in the header to inspect raw message JSON for each message
-- **Kumo UI** — Cloudflare's design system with dark/light mode
-- **Real-time** — WebSocket connection with automatic reconnection and message persistence
-
-## Making it your own
-
-### Name your project
-
-Update the name in `package.json` and `wrangler.jsonc` — the `name` in `wrangler.jsonc` becomes your deployed Worker's URL (`<name>.<subdomain>.workers.dev`).
-
-### Change the system prompt
-
-Edit the `system` string in `server.ts` to give your agent a different personality or focus area. This is the most impactful single change you can make.
-
-### Replace the demo tools with real ones
-
-The starter ships with demo tools (`getWeather` returns random data, `calculate` does basic arithmetic). Replace them with real implementations:
-
-```ts
-// In server.ts, replace a demo tool with a real API call:
-getWeather: tool({
-  description: "Get the current weather for a city",
-  inputSchema: z.object({ city: z.string() }),
-  execute: async ({ city }) => {
-    const res = await fetch(`https://api.weather.example/${city}`);
-    return res.json();
-  }
-}),
-```
-
-### Add your own tools
-
-Add new tools to the `tools` object in `server.ts`. There are three patterns:
-
-```ts
-// Auto-execute: runs on the server, no user interaction
-myTool: tool({
-  description: "...",
-  inputSchema: z.object({ /* ... */ }),
-  execute: async (input) => { /* return result */ }
-}),
-
-// Client-side: no execute function, browser provides the result
-// Handle it in app.tsx via the onToolCall callback
-browserTool: tool({
-  description: "...",
-  inputSchema: z.object({ /* ... */ })
-}),
-
-// Approval: add needsApproval to gate execution
-sensitiveTool: tool({
-  description: "...",
-  inputSchema: z.object({ /* ... */ }),
-  needsApproval: async (input) => true, // or conditional logic
-  execute: async (input) => { /* runs after approval */ }
-}),
-```
-
-### Customize scheduled task behavior
-
-When a scheduled task fires, `executeTask` runs on the server. It does its work and then uses `this.broadcast()` to notify connected clients (shown as a toast notification in the UI). Replace it with your own logic:
-
-```ts
-async executeTask(description: string, task: Schedule<string>) {
-  // Do the actual work
-  await sendEmail({ to: "user@example.com", subject: description });
-
-  // Notify connected clients
-  this.broadcast(
-    JSON.stringify({ type: "scheduled-task", description, timestamp: new Date().toISOString() })
-  );
-}
-```
-
-> **Why `broadcast()` instead of `saveMessages()`?** Injecting into chat history can cause the AI to see the notification as new context and re-trigger the same task in a loop. `broadcast()` sends a one-off event that the client displays separately from the conversation.
-
-### Remove scheduling
-
-If you don't need scheduling, remove `scheduleTask`, `getScheduledTasks`, and `cancelScheduledTask` from the tools object, the `executeTask` method, and the schedule-related imports (`getSchedulePrompt`, `scheduleSchema`, `Schedule`).
-
-### Add state beyond chat messages
-
-Use `this.setState()` and `this.state` for real-time state that syncs to all connected clients. See [Store and sync state](https://developers.cloudflare.com/agents/api-reference/store-and-sync-state/).
-
-### Add callable methods
-
-Expose agent methods as typed RPC that your client can call directly:
-
-```ts
-import { callable } from "agents";
-
-export class ChatAgent extends AIChatAgent<Env> {
-  @callable()
-  async getStats() {
-    return { messageCount: this.messages.length };
-  }
-}
-
-// Client-side:
-const stats = await agent.call("getStats");
-```
-
-See [Callable methods](https://developers.cloudflare.com/agents/api-reference/callable-methods/).
-
-### Connect to MCP servers
-
-Add external tools from MCP servers:
-
-```ts
-async onChatMessage(onFinish, options) {
-  // Connect to an MCP server
-  await this.mcp.connect("https://my-mcp-server.example/sse");
-
-  const result = streamText({
-    // ...
-    tools: {
-      ...myTools,
-      ...this.mcp.getAITools() // Include MCP tools
-    }
-  });
-}
-```
-
-See [MCP Client API](https://developers.cloudflare.com/agents/api-reference/mcp-client-api/).
-
-## Use a different AI model provider
-
-The starter uses [Workers AI](https://developers.cloudflare.com/workers-ai/) by default (no API key needed). To use a different provider:
-
-### OpenAI
+## Tests
 
 ```bash
-npm install @ai-sdk/openai
+npm test
 ```
 
-```ts
-// In server.ts, replace the model:
-import { openai } from "@ai-sdk/openai";
+The tools take the store as a parameter, so the tests use a simple in-memory store instead of a real Durable Object. They check ID assignment, rejecting unknown IDs and fields, enum normalisation, replacing next actions and blocking updates after an incident is closed.
 
-// Inside onChatMessage:
-const result = streamText({
-  model: openai("gpt-5.2")
-  // ...
-});
-```
+## Known issues
 
-Create a `.env` file with your API key:
+- **Replies don't stream word by word.** With Llama 3.3, `workers-ai-provider` reads every streamed chunk twice, which doubled the text and broke the JSON in tool calls. I found the cause in [cloudflare/ai#663](https://github.com/cloudflare/ai/pull/663), which isn't merged yet. As a workaround, I wrapped the model with the AI SDK's `simulateStreamingMiddleware`, which makes one normal call and replays it as a stream. It should be removed once the fix is released.
+- **Arrays sometimes arrive as strings.** Llama 3.3 occasionally sends `hypotheses` or `nextActions` as a JSON string instead of an array, so that update fails validation.
+- **The card can miss hypotheses.** The model sometimes records only its leading hypothesis, even when the reply discusses more.
+- **No auth or rate limiting** on the demo URL.
 
-```
-OPENAI_API_KEY=your-key-here
-```
+## What I'd do next
 
-### Anthropic
+- A shared list of all incidents, kept in a separate registry Durable Object, with search over past incidents
+- A side panel in the UI that shows the incident card live
+- Parse stringified arrays in the tool schema, and turn streaming back on once the upstream fix ships
+- Cloudflare Access and rate limiting in front of the Worker
+- Integration tests running inside the Workers runtime
 
-```bash
-npm install @ai-sdk/anthropic
-```
+## How I used AI
 
-```ts
-import { anthropic } from "@ai-sdk/anthropic";
+I used GitHub Copilot to write most of the code changes, reviewing Copilot's output and debugging. My Copilot prompts are in [PROMPTS.md](PROMPTS.md).
 
-const result = streamText({
-  model: anthropic("claude-sonnet-4-20250514")
-  // ...
-});
-```
-
-Create a `.env` file with your API key:
-
-```
-ANTHROPIC_API_KEY=your-key-here
-```
-
-## Deploy
-
-```bash
-npm run deploy
-```
-
-Your agent is live on Cloudflare's global network. Messages persist in SQLite, streams resume on disconnect, and the agent hibernates when idle.
-
-## Learn more
-
-- [Agents SDK documentation](https://developers.cloudflare.com/agents/)
-- [Build a chat agent tutorial](https://developers.cloudflare.com/agents/getting-started/build-a-chat-agent/)
-- [Chat agents API reference](https://developers.cloudflare.com/agents/api-reference/chat-agents/)
-- [Workers AI models](https://developers.cloudflare.com/workers-ai/models/)
-
-## License
-
-MIT

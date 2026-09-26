@@ -343,31 +343,7 @@ function Chat() {
           {messages.length === 0 && (
             <Empty
               icon={<ChatCircleDotsIcon size={32} />}
-              title="Start incident triage"
-              contents={
-                <div className="flex flex-wrap justify-center gap-2">
-                  {[
-                    "Our API started returning 503s after the latest deployment. Here are the logs...",
-                    "Users report checkout failures, but browsing still works. What should we check?",
-                    "A database pool change was deployed before connection timeouts began. Help triage this."
-                  ].map((prompt) => (
-                    <Button
-                      key={prompt}
-                      variant="outline"
-                      size="sm"
-                      disabled={isStreaming}
-                      onClick={() => {
-                        sendMessage({
-                          role: "user",
-                          parts: [{ type: "text", text: prompt }]
-                        });
-                      }}
-                    >
-                      {prompt}
-                    </Button>
-                  ))}
-                </div>
-              }
+              title="Start incident triage"             
             />
           )}
 
