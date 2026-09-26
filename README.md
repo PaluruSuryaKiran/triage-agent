@@ -87,4 +87,4 @@ The tools take the store as a parameter, so the tests use a simple in-memory sto
 
 My background is C#/.NET, Python and Azure. Cloudflare Workers, Durable Objects and TypeScript on the backend were new to me, and I built this over a weekend. I leaned on AI for TypeScript and SDK specifics, and focused my own effort on the design, the triage prompt, debugging and reviewing the generated code.
 
-I used GitHub Copilot for most of the code changes and debugging and reviewing of Copilot's output. My Copilot prompts are in [PROMPTS.md](PROMPTS.md), and the Claude conversation is here: <share link>.
+I used GitHub Copilot for most of the code changes and debugging and reviewing of Copilot's output. My Copilot prompts are in [PROMPTS.md](PROMPTS.md), and utilized Claude for generating this readme file and is reviewed and modified; Claude conversation is here: [LINK](https://claude.ai/share/51407841-c4f3-4259-ac95-376326baf70a).
