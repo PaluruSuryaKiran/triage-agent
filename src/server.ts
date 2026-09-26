@@ -1,5 +1,4 @@
-import { callable, routeAgentRequest, type Connection } from "agents";
-import { getSchedulePrompt } from "agents/schedule";
+import { routeAgentRequest, type Connection } from "agents";
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
 import {
   convertToModelMessages,
@@ -10,8 +9,6 @@ import {
 import { createTriageModel } from "./models/triage-model";
 import type { IncidentCard } from "./models/incident";
 import { createIncidentTools } from "./tools/incident-tools";
-import { createSchedulingTools } from "./tools/scheduling-tools";
-import type { ScheduleInput, ScheduledTask } from "./types";
 
 type TriageAgentState = {
   incident: IncidentCard | null;
@@ -21,27 +18,6 @@ export class TriageAgent extends AIChatAgent<Env, TriageAgentState> {
   initialState: TriageAgentState = { incident: null };
   maxPersistedMessages = 100;
   chatRecovery = true;
-  // Wait for MCP connections to be re-established after hibernation before.
-  // processing a message, so MCP tools aren't intermittently missing.
-  waitForMcpConnections = true;
-
-  onStart() {
-    // Configure OAuth popup behavior for MCP servers that require authentication
-    this.mcp.configureOAuthCallback({
-      customHandler: (result) => {
-        if (result.authSuccess) {
-          return new Response("<script>window.close();</script>", {
-            headers: { "content-type": "text/html" },
-            status: 200
-          });
-        }
-        return new Response(
-          `Authentication Failed: ${result.authError || "Unknown error"}`,
-          { headers: { "content-type": "text/plain" }, status: 400 }
-        );
-      }
-    });
-  }
 
   validateStateChange(_nextState: TriageAgentState, source: Connection | "server") {
     if (source !== "server") {
@@ -57,16 +33,6 @@ export class TriageAgent extends AIChatAgent<Env, TriageAgentState> {
     this.setState({ ...this.state, incident });
   }
 
-  @callable()
-  async addServer(name: string, url: string) {
-    return await this.addMcpServer(name, url);
-  }
-
-  @callable()
-  async removeServer(serverId: string) {
-    await this.removeMcpServer(serverId);
-  }
-
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
     const currentIncident = this.loadIncidentTicket();
     if (currentIncident?.status === "resolved") {
@@ -76,7 +42,6 @@ export class TriageAgent extends AIChatAgent<Env, TriageAgentState> {
       );
     }
 
-    const mcpTools = this.mcp.getAITools();
     const model = createTriageModel(this.env.AI, this.sessionAffinity);
 
     const result = streamText({
@@ -85,12 +50,12 @@ export class TriageAgent extends AIChatAgent<Env, TriageAgentState> {
       maxOutputTokens: 1024,
       system: `You are Triage Agent, an incident-management triage assistant. Analyze symptoms, logs, and evidence supplied by the user. You cannot inspect their environment or take actions unless an available tool explicitly does so. Never imply otherwise.
 
-    ${currentIncident ? `Current persisted incident ticket (authoritative stored state; update it when new user evidence changes the assessment):\n${JSON.stringify(currentIncident)}` : "No incident ticket exists yet. Create/update one with the updateIncident tool after assessing the incident."}
+    ${currentIncident ? `Current persisted incident ticket (authoritative stored state; update it when new user evidence changes the assessment):\n${JSON.stringify(currentIncident)}` : "No incident details yet."}
     
     Talk like a calm, experienced on-call colleague: plain sentences, no jargon about yourself.
     Never mention tools, function calls, or updates to the incident card in your replies.
     If the message is a greeting or small talk, reply in one short friendly line and ask what's going on, for example to paste logs or describe the symptom. Don't call any tools.
-    Only call tools when the user shares incident details, or asks you to schedule a reminder or close the incident.
+    Only call incident tools when the user shares incident details or asks to close the incident.
     Use the full structured answer only for the first assessment of an incident; after that, reply conversationally in a few sentences.
 
     For every incident, connect the timeline/activity to the observed evidence before recommending action. Structure your response in this order:
@@ -104,10 +69,7 @@ export class TriageAgent extends AIChatAgent<Env, TriageAgentState> {
     Be concise and calm. Separate observations from inferences.  Always check what changed recently (deploys, config, traffic, dependencies) and whether it affects one instance or all of them.
     For follow-up messages, answer directly and only repeat the full structure when new evidence changes the diagnosis.
     After each message with new evidence, call updateIncident with only what changed, and record every hypothesis you mention, not just the leading one. Then answer the engineer directly: say what the new evidence means for the diagnosis and the next step, with mitigation first if users are still affected. Never describe the tool call or the ticket changes; the engineer can see the card.
-    To close an incident, call closeIncident; the engineer must approve it. Only say the incident is resolved after that tool succeeds. Once an incident is resolved, no further chat or ticket updates are allowed for it.
-${getSchedulePrompt({ date: new Date() })}
-
-If the user asks to schedule a task, use the schedule tool to schedule the task.`,
+    To close an incident, call closeIncident; the engineer must approve it. Only say the incident is resolved after that tool succeeds. Once an incident is resolved, no further chat or ticket updates are allowed for it.`,
       // Prune old tool calls and reasoning to save tokens on long conversations
       messages: pruneMessages({
         messages: await convertToModelMessages(this.messages),
@@ -115,19 +77,9 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
         reasoning: "before-last-message"
       }),
       tools: {
-        // MCP tools from connected servers
-        ...mcpTools,
         ...createIncidentTools({
           load: () => this.loadIncidentTicket(),
           save: (incident: IncidentCard) => this.saveIncidentTicket(incident)
-        }),
-        ...createSchedulingTools({
-          schedule: (when: ScheduleInput, description: string) =>
-            this.schedule(when, "executeTask", description, {
-              idempotent: true
-            }),
-          getSchedules: () => this.getSchedules(),
-          cancelSchedule: (taskId: string) => this.cancelSchedule(taskId)
         })
       },
       stopWhen: stepCountIs(8),
@@ -135,23 +87,6 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
     });
 
     return result.toUIMessageStreamResponse();
-  }
-
-  async executeTask(description: string, _task: ScheduledTask) {
-    // Do the actual work here (send email, call API, etc.)
-    console.log(`Executing scheduled task: ${description}`);
-
-    // Notify connected clients via a broadcast event.
-    // We use broadcast() instead of saveMessages() to avoid injecting
-    // into chat history — that would cause the AI to see the notification
-    // as new context and potentially loop.
-    this.broadcast(
-      JSON.stringify({
-        type: "scheduled-task",
-        description,
-        timestamp: new Date().toISOString()
-      })
-    );
   }
 }
 
