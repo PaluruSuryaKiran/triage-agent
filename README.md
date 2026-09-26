@@ -2,7 +2,7 @@
 
 A small incident triage assistant running on Cloudflare. You paste logs or describe what's broken, and it tells you the most likely cause, a couple of other possibilities, and what to check next. While you talk to it, it keeps an incident card up to date: severity, hypotheses (active, confirmed or ruled out) and next actions. Closing an incident needs a human to approve it.
 
-Live demo: `https://triage-agent.<subdomain>.workers.dev`
+Live demo: `https://triage-agent.suryakiran.workers.dev`
 
 ## Assignment checklist
 
@@ -85,5 +85,6 @@ The tools take the store as a parameter, so the tests use a simple in-memory sto
 
 ## How I used AI
 
-I used GitHub Copilot to write most of the code changes, reviewing Copilot's output and debugging. My Copilot prompts are in [PROMPTS.md](PROMPTS.md).
+My background is C#/.NET, Python and Azure. Cloudflare Workers, Durable Objects and TypeScript on the backend were new to me, and I built this over a weekend. I leaned on AI for TypeScript and SDK specifics, and focused my own effort on the design, the triage prompt, debugging and reviewing the generated code.
 
+I used GitHub Copilot for most of the code changes and debugging and reviewing of Copilot's output. My Copilot prompts are in [PROMPTS.md](PROMPTS.md), and the Claude conversation is here: <share link>.
