@@ -12,6 +12,13 @@ export interface IncidentTicketStore {
   save(incident: IncidentCard): void;
 }
 
+const closeIncidentInputSchema = z
+  .object({
+    closedBy: z.string().trim().min(1).max(100),
+    resolutionSummary: z.string().trim().min(1).max(500)
+  })
+  .strict();
+
 const hypothesisPatchSchema = z
   .object({
     id: z.string().trim().min(1).max(100).optional(),
@@ -35,7 +42,7 @@ function normalizeEnum(value: unknown): unknown {
   return value.trim().toLowerCase().replace(/[ -]+/g, "_");
 }
 
-const incidentPatchSchema = z
+export const incidentPatchSchema = z
   .object({
     title: z.string().trim().min(1).max(80).optional(),
     status: z.preprocess(
@@ -250,8 +257,13 @@ export function createIncidentTools(store: IncidentTicketStore) {
           summary: "",
           hypotheses: [],
           nextActions: [],
+          closedBy: null,
+          closedAt: null,
           updated: new Date().toISOString()
         } satisfies IncidentCard;
+        if (previous.status === "resolved") {
+          return fail("This incident is closed. updateIncident cannot modify a resolved incident.");
+        }
         const hypothesisResult = mergeHypothesisPatch(
           previous.hypotheses,
           patch.hypotheses ?? []
@@ -281,6 +293,34 @@ export function createIncidentTools(store: IncidentTicketStore) {
           incident,
           changedHypotheses: hypothesisResult.changedHypotheses
         };
+      }
+    }),
+
+    closeIncident: tool({
+      description:
+        "Close/resolve the active incident. This action ALWAYS requires explicit human approval. Before calling, ask the user who should be recorded as closedBy if their identity is not already explicitly provided; never guess or invent the closer. Provide the resolutionSummary and closedBy in the approval request. Only after approval, set status to resolved, record closedBy, closedAt, and updated, and return the final card. A resolved incident is closed and cannot be edited by updateIncident.",
+      inputSchema: closeIncidentInputSchema,
+      needsApproval: true,
+      execute: async ({ closedBy, resolutionSummary }) => {
+        const previous = store.load();
+        if (!previous) {
+          return fail("No incident ticket exists to close. Create the incident ticket first.");
+        }
+        if (previous.status === "resolved") {
+          return fail("This incident is already closed.");
+        }
+
+        const now = new Date().toISOString();
+        const incident: IncidentCard = {
+          ...previous,
+          status: "resolved",
+          summary: resolutionSummary,
+          closedBy,
+          closedAt: now,
+          updated: now
+        };
+        store.save(incident);
+        return { success: true as const, incident };
       }
     })
   };

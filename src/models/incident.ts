@@ -26,6 +26,10 @@ export type IncidentCard = {
   hypotheses: IncidentHypothesis[];
   /** Proposed checks and other recommended steps are tracked here. */
   nextActions: string[];
+  /** Human identity recorded when the incident is resolved. */
+  closedBy: string | null;
+  /** ISO 8601 timestamp when the incident was resolved. */
+  closedAt: string | null;
   /** ISO 8601 timestamp of the most recent incident-card update. */
   updated: string;
 };
